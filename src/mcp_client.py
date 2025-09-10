@@ -7,6 +7,7 @@ class MCPClient:
     def __init__(self, config_path: str = "mcp_config.json", server_name: str = "SQLScout"):
         with open(config_path, "r", encoding="utf-8") as f:
             cfg = json.load(f)
+
         servers = cfg.get("servers", [])
         match = next((s for s in servers if s.get("name") == server_name), None)
         if not match:
@@ -17,16 +18,26 @@ class MCPClient:
 
         cmd = [match["command"]] + match.get("args", [])
         cwd = match.get("cwd", ".")
+
+        # --- Fuerza UTF-8 en el subproceso (crítico en Windows) ---
         env = os.environ.copy()
         env.update(match.get("env", {}))
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
 
         self.proc = subprocess.Popen(
-            cmd, cwd=cwd, env=env,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1
+            cmd,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,               # usa str en vez de bytes
+            encoding="utf-8",        # <--- clave
+            bufsize=1                # line-buffered
         )
 
-        # Handshake
+        # Handshake MCP
         self._send({
             "jsonrpc":"2.0", "id": self._id(),
             "method":"initialize",
@@ -37,7 +48,6 @@ class MCPClient:
             }
         })
         self._read()  # resp initialize
-
         self._send({"jsonrpc":"2.0","method":"notifications/initialized","params":{}})
 
     def _id(self) -> str:
@@ -45,7 +55,9 @@ class MCPClient:
 
     def _send(self, obj: Dict[str, Any]):
         assert self.proc.stdin is not None
-        self.proc.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        # ensure_ascii=False para no romper acentos
+        line = json.dumps(obj, ensure_ascii=False) + "\n"
+        self.proc.stdin.write(line)
         self.proc.stdin.flush()
 
     def _read(self) -> Dict[str, Any]:

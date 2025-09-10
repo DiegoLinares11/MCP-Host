@@ -5,7 +5,8 @@ from .mcp_client import MCPClient
 from .memory import Memory
 from .logging_middleware import JSONLLogger
 
-app = typer.Typer(help="MCP Host + Chat con OpenAI")
+app = typer.Typer(help="MCP Host + Chat con OpenAI", no_args_is_help=True)
+
 
 def _pretty(x): 
     return json.dumps(x, ensure_ascii=False, indent=2)
@@ -18,9 +19,16 @@ def _openai_client():
     client = OpenAI(api_key=api_key)
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     return client, model
+def ping():
+    """Prueba rápida de Typer."""
+    typer.echo("pong")
 
-@app.command()
-def chat(server: str = typer.Option("SQLScout", help="Nombre del server MCP en mcp_config.json")):
+app.command("ping")(ping)
+
+@app.command("chat")
+def chat(
+    server: str = typer.Option("SQLScout", help="Nombre del server MCP en mcp_config.json")
+):
     """
     Chat CLI con OpenAI + comandos MCP inline:
       :tools
