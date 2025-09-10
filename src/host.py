@@ -105,6 +105,27 @@ def chat(
             memory.add("assistant", f"Optimización: {_pretty(resp)}")
             continue
 
+        if user.startswith(":apply "):
+            ddl = user.replace(":apply","",1).strip()
+            resp = mcp.call("sql.apply", {"ddl": ddl})
+            typer.echo(_pretty(resp))
+            logger.log({"event":"tools/call","name":"sql.apply","ddl":ddl})
+            memory.add("assistant", f"DDL aplicado: {_pretty(resp)}")
+            continue
+
+        # opcional: :optapply <QUERY> || <DDL>
+        if user.startswith(":optapply "):
+            payload = user.replace(":optapply","",1).strip()
+            try:
+                q, ddl = [p.strip() for p in payload.split("||", 1)]
+            except ValueError:
+                typer.echo("Uso: :optapply <QUERY> || <DDL>")
+                continue
+            resp = mcp.call("sql.optimize_apply", {"query": q, "ddl": ddl})
+            typer.echo(_pretty(resp))
+            logger.log({"event":"tools/call","name":"sql.optimize_apply","query":q,"ddl":ddl})
+            continue
+
         # --- Chat con OpenAI ---
         memory.add("user", user)
 
