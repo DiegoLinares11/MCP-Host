@@ -1,0 +1,12 @@
+{
+  "servers": [
+    {
+      "name": "SQLScout",
+      "transport": "stdio",
+      "command": "python",
+      "args": ["-B", "-m", "src.server_mcp"],
+      "cwd": "C:/Users/diego/Documentos/UVG/Septimo Semestre/Redes/MCPLocal",
+      "env": {}
+    }
+  ]
+}
