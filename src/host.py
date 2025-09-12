@@ -9,6 +9,13 @@ from .memory import Memory
 from .logging_middleware import JSONLLogger
 
 app = typer.Typer(help="Chat Host (OpenAI) + Tool Calling hacia MCP (SQLScout/FS/Git)")
+def _settings():
+    load_dotenv()
+    ws = os.getenv("WORKSPACE_ROOT")
+    rp = os.getenv("REPO_ROOT")
+    if not ws or not rp:
+        raise RuntimeError("Faltan WORKSPACE_ROOT y/o REPO_ROOT en .env")
+    return ws.rstrip("/\\"), rp.rstrip("/\\")
 
 def _pretty(x): 
     return json.dumps(x, ensure_ascii=False, indent=2)
@@ -39,6 +46,10 @@ def render_tool_result(result: Dict[str, Any]) -> str:
         if texts:
             return "\n".join(texts)
     return _pretty(result)
+def _exec_fs_read_text(clients, relative_path: str) -> Dict[str, Any]:
+    WS, _ = _settings()
+    abs_path = os.path.normpath(os.path.join(WS, relative_path))
+    return clients["FS"].call("read_text_file", {"path": abs_path})
 
 # === Catálogo de tools para OpenAI (function calling) ===
 OPENAI_TOOLS = [
@@ -80,6 +91,60 @@ OPENAI_TOOLS = [
         }
     }},
 ]
+# === Wrappers de alto nivel (sin paths) ===
+OPENAI_TOOLS += [
+    {"type": "function", "function": {
+        "name": "fs_write_text",
+        "description": "Crea o sobrescribe un archivo de texto DENTRO del workspace. El path puede ser relativo (p.ej. 'README.md' o 'docs/plan.md').",
+        "parameters": {"type":"object","properties":{
+            "relative_path":{"type":"string","description":"Ruta relativa dentro del workspace"},
+            "content":{"type":"string"}
+        },"required":["relative_path","content"]}
+    }},
+    {"type": "function", "function": {
+        "name": "fs_list",
+        "description": "Lista un directorio del workspace (ruta relativa).",
+        "parameters": {"type":"object","properties":{
+            "relative_path":{"type":"string","description":"Ruta relativa dentro del workspace","default":"."}
+        },"required":["relative_path"]}
+    }},
+    {"type": "function", "function": {
+        "name": "git_init_here",
+        "description": "Inicializa un repositorio git en REPO_ROOT si aún no existe.",
+        "parameters": {"type":"object","properties":{},"required":[]}
+    }},
+    {"type": "function", "function": {
+        "name": "git_add_all",
+        "description": "Hace 'git add .' en REPO_ROOT.",
+        "parameters": {"type":"object","properties":{},"required":[]}
+    }},
+    {"type": "function", "function": {
+        "name": "git_commit_msg",
+        "description": "git commit -m en REPO_ROOT.",
+        "parameters": {"type":"object","properties":{
+            "message":{"type":"string"}
+        },"required":["message"]}
+    }},
+    {"type": "function", "function": {
+        "name": "git_status_here",
+        "description": "git status en REPO_ROOT.",
+        "parameters": {"type":"object","properties":{},"required":[]}
+    }},
+    {"type": "function", "function": {
+        "name": "git_log_here",
+        "description": "git log en REPO_ROOT.",
+        "parameters": {"type":"object","properties":{
+            "max_count":{"type":"integer","default":5}
+        },"required":[]}
+    }},
+        {"type": "function", "function": {
+        "name": "fs_read_text",
+        "description": "Lee un archivo de texto del workspace (ruta relativa).",
+        "parameters": {"type":"object","properties":{
+            "relative_path":{"type":"string"}
+        },"required":["relative_path"]}
+    }},
+]
 
 # Mapeo OpenAI -> tools del server SQLScout
 OPENAI_TO_MCP = {
@@ -101,6 +166,36 @@ def exec_mcp_generic(clients: Dict[str, MCPClient], server: str, name: str, argu
     if server not in clients:
         return {"content":[{"type":"text","text":f"Servidor '{server}' no está configurado."}],"isError":True}
     return clients[server].call(name, arguments)
+def _exec_fs_write_text(clients, relative_path: str, content: str) -> Dict[str, Any]:
+    WS, _ = _settings()
+    abs_path = os.path.normpath(os.path.join(WS, relative_path))
+    return clients["FS"].call("write_file", {"path": abs_path, "content": content})
+
+def _exec_fs_list(clients, relative_path: str = ".") -> Dict[str, Any]:
+    WS, _ = _settings()
+    abs_path = os.path.normpath(os.path.join(WS, relative_path))
+    return clients["FS"].call("list_directory", {"path": abs_path})
+
+def _exec_git_init_here(clients) -> Dict[str, Any]:
+    _, REPO = _settings()
+    return clients["Git"].call("git_init", {"repo_path": REPO})
+
+def _exec_git_add_all(clients) -> Dict[str, Any]:
+    _, REPO = _settings()
+    # usa git_add con files=["."] (el server git lo soporta)
+    return clients["Git"].call("git_add", {"repo_path": REPO, "files": ["."]})
+
+def _exec_git_commit_msg(clients, message: str) -> Dict[str, Any]:
+    _, REPO = _settings()
+    return clients["Git"].call("git_commit", {"repo_path": REPO, "message": message})
+
+def _exec_git_status_here(clients) -> Dict[str, Any]:
+    _, REPO = _settings()
+    return clients["Git"].call("git_status", {"repo_path": REPO})
+
+def _exec_git_log_here(clients, max_count: int = 5) -> Dict[str, Any]:
+    _, REPO = _settings()
+    return clients["Git"].call("git_log", {"repo_path": REPO, "max_count": max_count})
 
 @app.callback(invoke_without_command=True)
 def chat(
@@ -125,12 +220,16 @@ def chat(
             typer.echo(f"(nota) servidor '{name}' no disponible: {e}")
 
     system_prompt = (
-        "Eres un asistente de bases de datos con herramientas MCP. "
-        "Si el usuario pide cargar un esquema .sql, explicar/diagnosticar/optimizar una consulta, "
-        "elige y llama a las funciones adecuadas ANTES de responder. "
-        "También puedes usar servidores MCP oficiales (FS = filesystem, Git = git). "
-        "Cuando recibas resultados de herramientas, resume y recomienda pasos siguientes."
+        "Eres un asistente que puede operar sobre archivos (FS) y Git sin que el usuario dé rutas absolutas. "
+        "Reglas:\n"
+        "1) El WORKSPACE_ROOT y REPO_ROOT están configurados en variables de entorno; NUNCA preguntes al usuario la ruta absoluta.\n"
+        "2) Para crear/editar archivos usa fs_write_text(relative_path, content). Para listar usa fs_list(relative_path).\n"
+        "3) Para Git en REPO_ROOT: usa git_init_here(), git_add_all(), git_commit_msg(message), git_status_here(), git_log_here(max_count).\n"
+        "4) Para SQL usa sql_load/sql_explain/sql_diagnose/sql_optimize como antes.\n"
+        "5) Encadena tools: p.ej., si el usuario dice 'crea README y haz commit', primero fs_write_text('README.md', ...), luego git_add_all(), git_commit_msg('...').\n"
+        "6) Siempre que el usuario pida una acción concreta que requiera herramientas, LLÁMALAS antes de responder. "
     )
+
     memory.add("system", system_prompt)
 
     typer.echo("Chat iniciado. (Comandos: ':tools [FS|Git|SQLScout]', ':load <ruta.sql>', ':explain <SQL>', ':diagnose <SQL>', ':optimize <SQL>', ':apply <DDL>', ':quit')")
@@ -141,6 +240,35 @@ def chat(
             continue
         if user == ":quit":
             break
+        
+                # ====== Invocación genérica: :call <SERVER> <TOOL> <JSON> ======
+        if user.startswith(":call "):
+            try:
+                _, rest = user.split(" ", 1)
+                parts = rest.strip().split(" ", 2)
+                if len(parts) < 3:
+                    typer.echo("Uso: :call <SERVER> <TOOL> <JSON-ARGS>")
+                    continue
+                server_name, tool_name, json_args = parts[0], parts[1], parts[2]
+                import json as _json
+                args = _json.loads(json_args)
+            except Exception as e:
+                typer.echo(f"Error parseando comando :call: {e}")
+                continue
+
+            target_client = clients.get(server_name)
+            if not target_client:
+                typer.echo(f"Servidor '{server_name}' no está configurado.")
+                continue
+
+            try:
+                resp = target_client.call(tool_name, args)
+                pretty = render_tool_result(resp.get("result", resp))
+                typer.echo(pretty)
+                logger.log({"event":"tools/call","server":server_name,"tool":tool_name,"args":args})
+            except Exception as e:
+                typer.echo(f"Error llamando {server_name}:{tool_name} -> {e}")
+            continue
 
         # ===== Router NL -> :load si menciona .sql =====
         low = user.lower()
@@ -230,29 +358,51 @@ def chat(
         if tool_calls:
             tool_results_msgs = []
             for tc in tool_calls:
-                tname = tc.function.name
+                t_name = tc.function.name
+                args = {}
                 try:
                     args = json.loads(tc.function.arguments or "{}")
                 except Exception:
-                    args = {}
+                    pass
 
-                if tname == "mcp_run":
+                # === Router de wrappers amigables ===
+                # === Router de wrappers amigables ===
+                if t_name == "fs_write_text":
+                    mcp_resp = _exec_fs_write_text(clients, args["relative_path"], args["content"])
+                elif t_name == "fs_list":
+                    mcp_resp = _exec_fs_list(clients, args.get("relative_path","."))
+                elif t_name == "git_init_here":
+                    mcp_resp = _exec_git_init_here(clients)
+                elif t_name == "git_add_all":
+                    mcp_resp = _exec_git_add_all(clients)
+                elif t_name == "git_commit_msg":
+                    mcp_resp = _exec_git_commit_msg(clients, args["message"])
+                elif t_name == "git_status_here":
+                    mcp_resp = _exec_git_status_here(clients)
+                elif t_name == "git_log_here":
+                    mcp_resp = _exec_git_log_here(clients, args.get("max_count",5))
+                elif t_name == "fs_read_text":
+                    mcp_resp = _exec_fs_read_text(clients, args["relative_path"])
+
+                # Genérica (cualquier servidor/tool): mcp_run
+                elif t_name == "mcp_run":
                     mcp_resp = exec_mcp_generic(
                         clients,
-                        server=args.get("server",""),
-                        name=args.get("name",""),
-                        arguments=args.get("arguments",{})
+                        args["server"],
+                        args["name"],
+                        args.get("arguments", {})
                     )
-                elif tname in OPENAI_TO_MCP:
-                    mcp_resp = _exec_mcp_sql(clients, tname, args)
+
+                # SQL (usa el mapeo OPENAI_TO_MCP / cliente SQLScout)
                 else:
-                    mcp_resp = {"content":[{"type":"text","text":f"Tool '{tname}' no soportada en host."}],"isError":True}
+                    mcp_resp = _exec_mcp_sql(clients, t_name, args)
 
                 tool_results_msgs.append({
-                    "role":"tool",
+                    "role": "tool",
                     "tool_call_id": getattr(tc, "id", str(uuid.uuid4())),
                     "content": render_tool_result(mcp_resp.get("result", mcp_resp))
                 })
+
 
             follow = client.chat.completions.create(
                 model=model,
