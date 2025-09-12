@@ -7,6 +7,30 @@
       "args": ["-B", "-m", "src.server_mcp"],
       "cwd": "C:/Users/diego/Documentos/UVG/Septimo Semestre/Redes/MCPLocal",
       "env": {}
+    },
+    {
+      "name": "FS",
+      "transport": "stdio",
+      "command": "C:/Program Files/nodejs/npx.cmd",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "C:/Users/diego/Documentos/UVG/Septimo Semestre/Redes"
+      ],
+      "cwd": ".",
+      "env": {}
+    },
+    {
+      "name": "Git",
+      "transport": "stdio",
+      "command": "C:/Users/diego/.local/bin/uvx.exe",
+      "args": [
+        "mcp-server-git",
+        "--repository",
+        "C:/Users/diego/Documentos/UVG/Septimo Semestre/Redes/MCP Host"
+      ],
+      "cwd": ".",
+      "env": {}
     }
   ]
 }
