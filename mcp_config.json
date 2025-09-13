@@ -31,6 +31,13 @@
       ],
       "cwd": ".",
       "env": {}
+    },
+        {
+      "name": "Supabase",
+      "transport": "http",
+      "url": "http://localhost:5000",
+      "endpoint": "/mcp",
+      "timeout": 30
     }
   ]
 }

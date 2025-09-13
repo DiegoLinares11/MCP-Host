@@ -146,12 +146,65 @@ OPENAI_TOOLS += [
     }},
 ]
 
-# Mapeo OpenAI -> tools del server SQLScout
+# Añadir después de tus tools existentes:
+OPENAI_TOOLS += [
+    {"type": "function", "function": {
+        "name": "supabase_create_user",
+        "description": "Crea un nuevo usuario en Supabase",
+        "parameters": {"type": "object", "properties": {
+            "email": {"type": "string"},
+            "password": {"type": "string"},
+            "metadata": {"type": "object", "default": {}}
+        }, "required": ["email", "password"]}
+    }},
+    {"type": "function", "function": {
+        "name": "supabase_send_magic_link",
+        "description": "Envía un magic link de autenticación",
+        "parameters": {"type": "object", "properties": {
+            "email": {"type": "string"},
+            "redirect_to": {"type": "string", "default": "http://localhost:3000"}
+        }, "required": ["email"]}
+    }},
+    {"type": "function", "function": {
+        "name": "supabase_list_policies",
+        "description": "Lista políticas RLS de un schema",
+        "parameters": {"type": "object", "properties": {
+            "schema_name": {"type": "string", "default": "public"},
+            "table_name": {"type": "string"}
+        }, "required": ["schema_name"]}
+    }},
+    {"type": "function", "function": {
+        "name": "supabase_set_role",
+        "description": "Asigna rol a un usuario",
+        "parameters": {"type": "object", "properties": {
+            "user_id": {"type": "string"},
+            "role": {"type": "string"},
+            "expires_at": {"type": "string"}
+        }, "required": ["user_id", "role"]}
+    }},
+    {"type": "function", "function": {
+        "name": "supabase_user_stats",
+        "description": "Obtiene estadísticas de usuarios",
+        "parameters": {"type": "object", "properties": {
+            "period": {"type": "string", "enum": ["today", "week", "month", "all"], "default": "week"}
+        }, "required": []}
+    }},
+    {"type": "function", "function": {
+        "name": "supabase_bulk_invite",
+        "description": "Invita múltiples usuarios en lote",
+        "parameters": {"type": "object", "properties": {
+            "emails": {"type": "array", "items": {"type": "string"}},
+            "default_role": {"type": "string", "default": "user"}
+        }, "required": ["emails"]}
+    }}
+]
+
+# Mapeo OpenAI -> tools del server SQLScouts
 OPENAI_TO_MCP = {
     "sql_load": "sql.load",
     "sql_explain": "sql.explain",
     "sql_diagnose": "sql.diagnose",
-    "sql_optimize": "sql.optimize",
+    "sql_optimize": "sql.optimize", 
     "sql_apply": "sql.apply",
     "sql_optimize_apply": "sql.optimize_apply",
 }
@@ -210,7 +263,7 @@ def chat(
     logger = JSONLLogger()
 
     # crea clientes por nombre (deben existir en mcp_config.json)
-    SERVERS = ["SQLScout", "FS", "Git"]
+    SERVERS = ["SQLScout", "FS", "Git", "Supabase"]
     clients: Dict[str, MCPClient] = {}
     for name in SERVERS:
         try:
@@ -218,6 +271,21 @@ def chat(
         except Exception as e:
             # No pasa nada si alguno no existe; solo avisa en pantalla
             typer.echo(f"(nota) servidor '{name}' no disponible: {e}")
+
+        # === Importar tools remotas del server "Supabase" al catálogo de OpenAI ===
+    REMOTE_SUPABASE_TOOL_NAMES = set()
+    if "Supabase" in clients:
+        try:
+            res = clients["Supabase"].list_tools()
+            supabase_tools = res.get("result", {}).get("tools", [])
+            for t in supabase_tools:
+                # Agrega cada tool remota tal cual (nombre real: create_user, list_users, etc.)
+                OPENAI_TOOLS.append({"type": "function", "function": t})
+            REMOTE_SUPABASE_TOOL_NAMES = {t.get("name") for t in supabase_tools if isinstance(t, dict)}
+            typer.echo(f"✅ Tools de Supabase añadidas: {sorted(REMOTE_SUPABASE_TOOL_NAMES)}")
+        except Exception as e:
+            typer.echo(f"⚠️ No se pudieron cargar las tools de Supabase: {e}")
+
 
     system_prompt = (
         "Eres un asistente que puede operar sobre archivos (FS) y Git sin que el usuario dé rutas absolutas. "
@@ -227,8 +295,17 @@ def chat(
         "3) Para Git en REPO_ROOT: usa git_init_here(), git_add_all(), git_commit_msg(message), git_status_here(), git_log_here(max_count).\n"
         "4) Para SQL usa sql_load/sql_explain/sql_diagnose/sql_optimize como antes.\n"
         "5) Encadena tools: p.ej., si el usuario dice 'crea README y haz commit', primero fs_write_text('README.md', ...), luego git_add_all(), git_commit_msg('...').\n"
-        "6) Siempre que el usuario pida una acción concreta que requiera herramientas, LLÁMALAS antes de responder. "
+        "6) Siempre que el usuario pida una acción concreta que requiera herramientas, LLÁMALAS antes de responder.\n\n"
+        "Extensión para Supabase:\n"
+        "- Si el usuario pide crear, listar, actualizar, eliminar o recuperar usuarios, DEBES usar las tools de Supabase: "
+        "create_user, list_users, get_user_by_id, update_user_metadata, delete_user.\n"
+        "- Si pide enlaces de acceso o autenticación, usa send_magic_link o reset_user_password.\n"
+        "- Si pide estadísticas de usuarios, usa get_user_stats.\n"
+        "- Si pide invitar varios correos, usa bulk_invite_users.\n"
+        "- Nunca respondas 'no tengo acceso a la base de datos'. Debes llamar a la tool.\n"
+        "- Interpreta español natural: 'contraseña' => password, 'correo' => email.\n"
     )
+
 
     memory.add("system", system_prompt)
 
@@ -383,6 +460,25 @@ def chat(
                     mcp_resp = _exec_git_log_here(clients, args.get("max_count",5))
                 elif t_name == "fs_read_text":
                     mcp_resp = _exec_fs_read_text(clients, args["relative_path"])
+
+                # === Tools remotas reales del server "Supabase" ===
+                elif t_name in REMOTE_SUPABASE_TOOL_NAMES:
+                    mcp_resp = exec_mcp_generic(clients, "Supabase", t_name, args)
+
+
+                # Supabase
+                elif t_name == "supabase_create_user":
+                    mcp_resp = exec_mcp_generic(clients, "Supabase", "create_user", args)
+                elif t_name == "supabase_send_magic_link":
+                    mcp_resp = exec_mcp_generic(clients, "Supabase", "send_magic_link", args)
+                elif t_name == "supabase_list_policies":
+                    mcp_resp = exec_mcp_generic(clients, "Supabase", "list_policies", args)
+                elif t_name == "supabase_set_role":
+                    mcp_resp = exec_mcp_generic(clients, "Supabase", "set_user_role", args)
+                elif t_name == "supabase_user_stats":
+                    mcp_resp = exec_mcp_generic(clients, "Supabase", "get_user_stats", args)
+                elif t_name == "supabase_bulk_invite":
+                    mcp_resp = exec_mcp_generic(clients, "Supabase", "bulk_invite_users", args)
 
                 # Genérica (cualquier servidor/tool): mcp_run
                 elif t_name == "mcp_run":

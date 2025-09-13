@@ -1,4 +1,4 @@
-import json, subprocess, uuid, os
+import json, subprocess, uuid, os, requests
 from typing import Any, Dict
 
 class MCPConfigError(Exception): ...
@@ -13,54 +13,88 @@ class MCPClient:
         if not match:
             raise MCPConfigError(f"Server '{server_name}' no encontrado en {config_path}")
 
-        if match.get("transport") != "stdio":
-            raise MCPConfigError("Solo stdio implementado en este MVP")
+        self.server_name = server_name
+        self.transport = match.get("transport", "stdio")
+        
+        if self.transport == "stdio":
+            self._init_stdio(match)
+        elif self.transport == "http":
+            self._init_http(match)
+        else:
+            raise MCPConfigError(f"Transporte '{self.transport}' no soportado")
 
-        cmd = [match["command"]] + match.get("args", [])
-        cwd = match.get("cwd", ".")
+    def _init_stdio(self, config: Dict[str, Any]):
+        """Inicializar cliente stdio (existente)"""
+        cmd = [config["command"]] + config.get("args", [])
+        cwd = config.get("cwd", ".")
 
-        # --- Fuerza UTF-8 en el subproceso (crítico en Windows) ---
         env = os.environ.copy()
-        env.update(match.get("env", {}))
+        env.update(config.get("env", {}))
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
 
         self.proc = subprocess.Popen(
-            cmd,
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,               # usa str en vez de bytes
-            encoding="utf-8",        # <--- clave
-            bufsize=1                # line-buffered
+            cmd, cwd=cwd, env=env,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", bufsize=1
         )
 
         # Handshake MCP
-        self._send({
-            "jsonrpc":"2.0", "id": self._id(),
-            "method":"initialize",
-            "params":{
-                "protocolVersion":"2024-11-05",
-                "clientInfo":{"name":"host-cli","version":"0.1"},
+        self._send_stdio({
+            "jsonrpc": "2.0", "id": self._id(),
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "clientInfo": {"name": "host-cli", "version": "0.1"},
                 "capabilities": {}
             }
         })
-        self._read()  # resp initialize
-        self._send({"jsonrpc":"2.0","method":"notifications/initialized","params":{}})
+        self._read_stdio()  # resp initialize
+        self._send_stdio({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+
+    def _init_http(self, config: Dict[str, Any]):
+        """Inicializar cliente HTTP"""
+        self.base_url = config.get("url", "").rstrip("/")
+        self.endpoint = config.get("endpoint", "/mcp")
+        self.timeout = config.get("timeout", 30)
+        self.headers = {"Content-Type": "application/json"}
+        
+        if not self.base_url:
+            raise MCPConfigError("URL es requerida para transporte HTTP")
+
+        # Handshake MCP via HTTP
+        response = self._send_http({
+            "jsonrpc": "2.0", "id": self._id(),
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "clientInfo": {"name": "host-cli", "version": "0.1"},
+                "capabilities": {}
+            }
+        })
+        
+        # Notification initialized
+        try:
+            self._send_http({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {}
+            })
+        except:
+            pass  # Las notificaciones pueden no retornar respuesta
 
     def _id(self) -> str:
         return str(uuid.uuid4())
 
-    def _send(self, obj: Dict[str, Any]):
+    def _send_stdio(self, obj: Dict[str, Any]):
+        """Enviar mensaje via stdio"""
         assert self.proc.stdin is not None
-        # ensure_ascii=False para no romper acentos
         line = json.dumps(obj, ensure_ascii=False) + "\n"
         self.proc.stdin.write(line)
         self.proc.stdin.flush()
 
-    def _read(self) -> Dict[str, Any]:
+    def _read_stdio(self) -> Dict[str, Any]:
+        """Leer respuesta via stdio"""
         assert self.proc.stdout is not None
         line = self.proc.stdout.readline()
         if not line:
@@ -68,16 +102,67 @@ class MCPClient:
             raise RuntimeError(f"Sin respuesta del servidor.\nSTDERR:\n{err}")
         return json.loads(line)
 
+    def _send_http(self, obj: Dict[str, Any]) -> Dict[str, Any]:
+        """Enviar mensaje via HTTP y retornar respuesta"""
+        url = f"{self.base_url}{self.endpoint}"
+        
+        try:
+            response = requests.post(
+                url, 
+                json=obj, 
+                headers=self.headers,
+                timeout=self.timeout
+            )
+            
+            # Para notificaciones que retornan 204
+            if response.status_code == 204:
+                return {"result": "notification sent"}
+            
+            response.raise_for_status()
+            return response.json()
+            
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(f"Error HTTP comunicando con {url}: {e}")
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Error decodificando respuesta JSON: {e}")
+
     def list_tools(self) -> Dict[str, Any]:
-        self._send({"jsonrpc":"2.0","id": self._id(),"method":"tools/list","params":{}})
-        return self._read()
+        """Listar herramientas disponibles"""
+        request = {
+            "jsonrpc": "2.0",
+            "id": self._id(),
+            "method": "tools/list",
+            "params": {}
+        }
+        
+        if self.transport == "stdio":
+            self._send_stdio(request)
+            return self._read_stdio()
+        else:  # http
+            response = self._send_http(request)
+            return response
 
     def call(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        self._send({"jsonrpc":"2.0","id": self._id(),"method":"tools/call","params":{"name":name,"arguments":arguments}})
-        return self._read()
+        """Llamar una herramienta"""
+        request = {
+            "jsonrpc": "2.0",
+            "id": self._id(),
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments}
+        }
+        
+        if self.transport == "stdio":
+            self._send_stdio(request)
+            return self._read_stdio()
+        else:  # http
+            response = self._send_http(request)
+            return response
 
     def close(self):
-        try:
-            self.proc.terminate()
-        except Exception:
-            pass
+        """Cerrar conexión"""
+        if self.transport == "stdio" and hasattr(self, 'proc'):
+            try:
+                self.proc.terminate()
+            except Exception:
+                pass
+        # HTTP no necesita cleanup explícito
