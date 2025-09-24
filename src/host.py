@@ -114,10 +114,13 @@ OPENAI_TOOLS += [
         "parameters": {"type":"object","properties":{},"required":[]}
     }},
     {"type": "function", "function": {
-        "name": "git_add_all",
-        "description": "Hace 'git add .' en REPO_ROOT.",
-        "parameters": {"type":"object","properties":{},"required":[]}
+        "name": "git_add_files",
+        "description": "Añade SOLO los archivos indicados al staging (paths relativos al REPO_ROOT). Nunca uses 'add all'.",
+        "parameters": {"type":"object","properties":{
+            "files":{"type":"array","items":{"type":"string"},"description":"Lista de rutas relativas a la raíz del repo"}
+        },"required":["files"]}
     }},
+
     {"type": "function", "function": {
         "name": "git_commit_msg",
         "description": "git commit -m en REPO_ROOT.",
@@ -233,6 +236,26 @@ def _exec_git_init_here(clients) -> Dict[str, Any]:
     _, REPO = _settings()
     return clients["Git"].call("git_init", {"repo_path": REPO})
 
+def _exec_git_add_files(clients, files: List[str]) -> Dict[str, Any]:
+    _, REPO = _settings()
+    # Filtro defensivo para evitar `.git`, `__pycache__`, binarios, etc.
+    BLOCKLIST_PREFIXES = (".git", "_git", "__pycache__")
+    BLOCKLIST_EXT = (".pyc", ".pyo", ".pyd", ".log")
+
+    safe: List[str] = []
+    for f in files:
+        rp = (f or "").replace("\\", "/").lstrip("/")
+        if (not rp) or any(rp.startswith(p) for p in BLOCKLIST_PREFIXES) or rp.endswith(BLOCKLIST_EXT):
+            continue
+        safe.append(rp)
+
+    if not safe:
+        return {"content":[{"type":"text","text":"No hay archivos válidos para agregar (se filtraron por reglas de seguridad)."}],"isError":True}
+
+    # Llama al server Git con lista explícita
+    return clients["Git"].call("git_add", {"repo_path": REPO, "files": safe})
+
+
 def _exec_git_add_all(clients) -> Dict[str, Any]:
     _, REPO = _settings()
     # usa git_add con files=["."] (el server git lo soporta)
@@ -292,9 +315,9 @@ def chat(
         "Reglas:\n"
         "1) El WORKSPACE_ROOT y REPO_ROOT están configurados en variables de entorno; NUNCA preguntes al usuario la ruta absoluta.\n"
         "2) Para crear/editar archivos usa fs_write_text(relative_path, content). Para listar usa fs_list(relative_path).\n"
-        "3) Para Git en REPO_ROOT: usa git_init_here(), git_add_all(), git_commit_msg(message), git_status_here(), git_log_here(max_count).\n"
+        "3) Para Git en REPO_ROOT: usa git_init_here(), git_add_files(files=[...]), git_commit_msg(message), git_status_here(), git_log_here(max_count). NUNCA uses “add all”. Siempre especifica la lista de archivos exactos a stagear. NO incluyas rutas a .git, _git, __pycache__, *.pyc, *.pyo, *.pyd, *.log, ni nada ignorado por .gitignore.\n"
         "4) Para SQL usa sql_load/sql_explain/sql_diagnose/sql_optimize como antes.\n"
-        "5) Encadena tools: p.ej., si el usuario dice 'crea README y haz commit', primero fs_write_text('README.md', ...), luego git_add_all(), git_commit_msg('...').\n"
+        "5) Encadena tools: p.ej., si el usuario dice 'crea README y haz commit', primero fs_write_text('README.md', ...), luego git_add_files(files=['README.md']), y por último git_commit_msg('mensaje descriptivo').\n"
         "6) Siempre que el usuario pida una acción concreta que requiera herramientas, LLÁMALAS antes de responder.\n\n"
         "Extensión para Supabase:\n"
         "- Si el usuario pide crear, listar, actualizar, eliminar o recuperar usuarios, DEBES usar las tools de Supabase: "
@@ -460,6 +483,9 @@ def chat(
                     mcp_resp = _exec_git_log_here(clients, args.get("max_count",5))
                 elif t_name == "fs_read_text":
                     mcp_resp = _exec_fs_read_text(clients, args["relative_path"])
+                elif t_name == "git_add_files":
+                    mcp_resp = _exec_git_add_files(clients, args.get("files", []))
+
 
                 # === Tools remotas reales del server "Supabase" ===
                 elif t_name in REMOTE_SUPABASE_TOOL_NAMES:

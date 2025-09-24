@@ -1,0 +1,12 @@
+1. Correo: linaresdiego467@gmail.com
+   - ID: 4660a966-a750-4034-b4df-e6f1fa371144
+   - Rol: authenticated
+   - Fecha de creación: 2025-09-24
+   - Confirmado: Sí
+
+2. Correo: diegolinares225@gmail.com
+   - ID: 4f86ecd5-f36e-47bc-a53a-7341601209b1
+   - Rol: authenticated
+   - Fecha de creación: 2025-09-22
+   - Confirmado: Sí
+   - Teléfono: 3045

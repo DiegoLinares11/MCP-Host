@@ -1,6 +1,6 @@
 # MCP Host
 
-Este proyecto implementa un **chatbot con integración a servidores MCP** que permite interactuar con distintas herramientas (SQL, sistema de archivos y Git) desde lenguaje natural.  
+Este proyecto implementa un **chatbot con integración a servidores MCP** que permite interactuar con distintas herramientas (SQL, sistema de archivos, Git y Supabase) desde lenguaje natural.  
 
 La motivación es cumplir con la rúbrica del curso de Redes sobre el uso de **Model Context Protocol (MCP)**, demostrando cómo un asistente puede coordinar múltiples servidores MCP locales y remotos.
 
@@ -12,6 +12,7 @@ La motivación es cumplir con la rúbrica del curso de Redes sobre el uso de **M
    - Chat interactivo en consola con OpenAI como motor LLM.
    - Soporte para **tool calling** (el modelo invoca herramientas cuando corresponde).
    - Memoria de la conversación y logging en JSONL.
+   - **Carga automática de tools remotas de Supabase** si el servidor remoto está corriendo.
 
 2. **Servidores MCP integrados**:
    - **SQLScout (local)**  
@@ -21,22 +22,27 @@ La motivación es cumplir con la rúbrica del curso de Redes sobre el uso de **M
      - Aplicar índices (`CREATE INDEX`) directamente sobre SQLite.
    - **Filesystem (FS)**  
      - Crear, leer, editar y listar archivos dentro del `WORKSPACE_ROOT`.  
-     - Ejemplo: crear un `README.md` desde lenguaje natural.  
    - **Git**  
      - Inicializar repositorios.  
      - Agregar y commitear archivos.  
      - Consultar `git status` y `git log`.  
-
+   - **Supabase Admin Helper (remoto)**  
+     - Crear y listar usuarios.  
+     - Obtener info de un usuario por ID.  
+     - Actualizar `user_metadata`.  
+     - Eliminar usuarios.  
+     - Enviar magic links y correos de reset de contraseña.  
+     - Obtener estadísticas de usuarios.  
+     - Invitar usuarios en lote.
+     
 3. **Wrappers amigables**:
-   - Se implementaron herramientas “altas” como:
+   - Se implementaron herramientas de alto nivel como:
      - `fs_write_text(relative_path, content)`
-     - `git_init_here()`, `git_add_all()`, `git_commit_msg(message)`
-   - De esta forma, el usuario no necesita rutas absolutas ni parámetros engorrosos.  
-     Basta con decir *“Crea un README y haz commit”* y el host encadena las llamadas correctas.
-
+     - `git_commit_msg(message)`
+   - El usuario puede usar lenguaje natural sin preocuparse por comandos técnicos.  
 ---
 
-## 🛠️ ¿Por qué lo hicimos así?
+##  ¿Por qué lo hicimos así?
 
 Existen dos caminos para integrar MCP:
 
@@ -57,17 +63,17 @@ Elegimos el flujo manual porque:
 
 ```
 MCP HOST/
-├── logs/                   # Logs de interacción
+├── logs/                     # Logs de interacción
 ├── src/
-│   ├── host.py             # Chat host principal (OpenAI + MCP)
-│   ├── mcp_client.py       # Cliente simple para servidores MCP
-│   ├── memory.py           # Memoria de la conversación
+│   ├── host.py               # Chat host principal (OpenAI + MCP)
+│   ├── mcp_client.py         # Cliente simple para servidores MCP
+│   ├── memory.py             # Memoria de la conversación
 │   ├── logging_middleware.py # Logger en formato JSONL
 │   └── __init__.py
-├── mcp_config.json         # Configuración de servers MCP
-├── .env.example            # Variables de entorno (ejemplo)
-├── requirements.txt        # Dependencias Python
-└── README.md               # Este archivo
+├── mcp_config.json           # Configuración de servers MCP
+├── .env.example              # Variables de entorno (ejemplo)
+├── requirements.txt          # Dependencias Python
+└── README.md                 # Este archivo
 ```
 
 ---
@@ -103,6 +109,11 @@ MCP HOST/
    OPENAI_MODEL=gpt-4o-mini
    WORKSPACE_ROOT=C:/Users/.../Redes
    REPO_ROOT=C:/Users/.../Redes/MCP Host
+
+   # Credenciales Supabase
+   SUPABASE_URL=https://<tu-proyecto>.supabase.co
+   SUPABASE_SERVICE_ROLE_KEY=...
+   SUPABASE_ANON_KEY=...
    ```
 
 5. **Editar `mcp_config.json`**  
@@ -131,8 +142,14 @@ MCP HOST/
          "transport": "stdio",
          "command": "uvx",
          "args": ["mcp-server-git", "--repository", "C:/Users/.../Redes/MCP Host"],
-         "cwd": ".",
-         "env": {}
+         "cwd": "."
+       },
+       {
+         "name": "Supabase",
+         "transport": "http",
+         "command": "python",
+         "args": ["supabaseAdminHelper.py"],
+         "cwd": "src/remoteMCP"
        }
      ]
    }
@@ -149,7 +166,7 @@ python -m src.host
 ```
 
 Comandos disponibles:
-- `:tools [FS|Git|SQLScout]` → listar herramientas de un server.  
+- `:tools [FS|Git|SQLScout|Supabase]` → listar herramientas de un server.  
 - `:load <file.sql>` → cargar esquema SQL.  
 - `:explain <SQL>` → plan de ejecución.  
 - `:diagnose <SQL>` → diagnóstico estático.  
@@ -159,8 +176,8 @@ Comandos disponibles:
 
 Ejemplos en lenguaje natural:
 - *“Crea un README.md con una descripción del proyecto y haz commit.”*  
-- *“Carga el esquema demo_schema.sql y explícame la consulta SELECT * FROM orders ORDER BY created_at DESC.”*  
-- *“Lista los archivos en el workspace.”*  
+- *“Lista todos los usuarios registrados en Supabase.”*  
+- *“Actualiza el `user_metadata` del usuario con ID X para agregar su teléfono.”*  
+- *“Manda un reset de contraseña al usuario diego@example.com.”*  
 
 ---
-
